@@ -1,0 +1,12 @@
+# Dependency
+node_modules/
+
+# Environment variables (PENTING: Jangan di-upload)
+.env
+
+# Session & Cookies (PENTING: Ini kunci akses akunmu)
+/session/linkedinSession.json
+/session/profile/
+
+# Logs
+npm-debug.log
