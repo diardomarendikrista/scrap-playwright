@@ -3,7 +3,7 @@ const BaseScraper = require("./BaseScraper");
 class RecommendationScraper extends BaseScraper {
   async scrape(url) {
     const cleanUrl = url.endsWith("/") ? url.slice(0, -1) : url;
-    const recUrl = `${cleanUrl}/details/recommendations/?detailScreenTabIndex=0`; // Tab 0 = Received
+    const recUrl = `${cleanUrl}/details/recommendations/?detailScreenTabIndex=0`;
     const page = await this.initPage(recUrl);
 
     try {
@@ -21,23 +21,33 @@ class RecommendationScraper extends BaseScraper {
 
         return [...items]
           .map((el) => {
-            const textCol = el.querySelector(".display-flex.flex-column");
-            if (!textCol) return null;
-
-            const spans = textCol.querySelectorAll("span[aria-hidden='true']");
-
-            // Text rekomendasi ada di sub-component -> inline-show-more-text
-            const descElem = el.querySelector(
-              ".inline-show-more-text span[aria-hidden='true']"
+            // Ambil nama dari .t-bold span
+            const nameSpan = el.querySelector(
+              ".t-bold span[aria-hidden='true']"
             );
+            const name = nameSpan ? nameSpan.innerText.trim() : null;
+
+            // Ambil relation dari .pvs-entity__caption-wrapper
+            const relationSpan = el.querySelector(
+              ".pvs-entity__caption-wrapper[aria-hidden='true']"
+            );
+            const relation = relationSpan
+              ? relationSpan.innerText.trim()
+              : null;
+
+            // Ambil text rekomendasi dari .pvs-entity__sub-components
+            const descElem = el.querySelector(
+              ".pvs-entity__sub-components .t-14.t-normal.t-black span[aria-hidden='true']"
+            );
+            const text = descElem ? descElem.innerText.trim() : null;
 
             return {
-              name: spans[0] ? spans[0].innerText.trim() : null, // Nama Pemberi
-              relation: spans[2] ? spans[2].innerText.trim() : null, // Hubungan (misal: worked with...)
-              text: descElem ? descElem.innerText.trim() : null,
+              name,
+              relation,
+              text,
             };
           })
-          .filter((i) => i !== null);
+          .filter((i) => i !== null && i.text !== null);
       });
 
       await page.close();
