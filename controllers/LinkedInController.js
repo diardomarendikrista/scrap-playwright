@@ -1,4 +1,5 @@
 const LinkedInService = require("../services/LinkedInService");
+const QueueRepository = require("../database/QueueRepository");
 
 class LinkedInController {
   async getRoot(req, res) {
@@ -25,6 +26,33 @@ class LinkedInController {
       console.error(err);
       res.status(500).json({ success: false, message: err.message });
     }
+  }
+
+  // Endpoint: POST /queue/add
+  async addToQueue(req, res) {
+    try {
+      const { urls } = req.body; // Format: [{url: "..."}, {url: "..."}]
+      if (!Array.isArray(urls)) return res.status(400).send("Urls harus array");
+
+      const count = await QueueRepository.add(urls);
+      res.json({
+        success: true,
+        message: `${count} URL berhasil masuk antrian.`,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  // Endpoint: GET /worker/start (Untuk memicu worker manual)
+  async startWorker(req, res) {
+    // Jangan pakai await, biarkan dia jalan di background (fire and forget)
+    LinkedInService.startQueueWorker().catch(console.error);
+
+    res.json({
+      success: true,
+      message: "Worker telah dijalankan di background.",
+    });
   }
 
   async logout(req, res) {
