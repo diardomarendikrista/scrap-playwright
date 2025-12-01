@@ -52,7 +52,7 @@ npm install
 Buat database baru di PostgreSQL bernama scrap_playwright. Lalu jalankan query SQL berikut di query tool (pgAdmin/DBeaver) untuk membuat tabel:
 
 ```SQL
--- 1. Tabel Akun (Multi-Tenant & Rotation)
+-- Tabel Akun (Multi-Tenant & Rotation)
 CREATE TABLE accounts (
 id SERIAL PRIMARY KEY,
 email VARCHAR(255) UNIQUE NOT NULL,
@@ -64,7 +64,7 @@ last_used TIMESTAMP,
 created_at TIMESTAMP DEFAULT NOW()
 );
 
--- 2. Tabel Antrian (Queue System)
+-- Tabel Antrian (Queue System)
 CREATE TABLE scrape_queue (
 id SERIAL PRIMARY KEY,
 target_url TEXT UNIQUE NOT NULL,
@@ -75,7 +75,7 @@ created_at TIMESTAMP DEFAULT NOW(),
 updated_at TIMESTAMP DEFAULT NOW()
 );
 
--- 3. Tabel Data Profil (Hybrid Relational + JSONB)
+-- Tabel Data Profil (Hybrid Relational + JSONB)
 CREATE TABLE profiles (
 id SERIAL PRIMARY KEY,
 url TEXT UNIQUE NOT NULL,
@@ -94,6 +94,10 @@ url TEXT UNIQUE NOT NULL,
     projects JSONB DEFAULT '[]',
     skills JSONB DEFAULT '[]',
     recommendations JSONB DEFAULT '[]',
+
+    -- kolom status dan catatan
+    status VARCHAR(20) DEFAULT 'success',
+    note TEXT,
 
     -- Metadata
     scraped_at TIMESTAMP DEFAULT NOW()

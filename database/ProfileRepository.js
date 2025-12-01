@@ -1,12 +1,17 @@
 const db = require("../config/db");
 
 class ProfileRepository {
-  async save(data) {
+  /**
+   * @param {Object} data - Data scraping
+   * @param {String} status - 'success' | 'failed' | 'not_found'
+   * @param {String} note - Note for error message, etc
+   */
+  async save(data, status = "success", note = null) {
     // 1. Bongkar data dari Scraper
     // Struktur data dari composite scraper adalah:
     // { profile: {...}, experience: [...], education: [...], ... }
     const {
-      url, // Kita akan inject ini di Service nanti
+      url, // akan inject ini di Service nanti
       profile,
       experience,
       education,
@@ -31,9 +36,11 @@ class ProfileRepository {
         projects, 
         skills, 
         recommendations,
-        scraped_at
+        scraped_at,
+        status,
+        note
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13, $14)
       ON CONFLICT (url) 
       DO UPDATE SET 
         name = EXCLUDED.name,
@@ -47,7 +54,9 @@ class ProfileRepository {
         projects = EXCLUDED.projects,
         skills = EXCLUDED.skills,
         recommendations = EXCLUDED.recommendations,
-        scraped_at = NOW()
+        scraped_at = NOW(),
+        status = EXCLUDED.status,
+        note = EXCLUDED.note
       RETURNING id;
     `;
 
@@ -66,13 +75,13 @@ class ProfileRepository {
       JSON.stringify(project || []),
       JSON.stringify(skill || []),
       JSON.stringify(recommendation || []),
+      status,
+      note,
     ];
 
     try {
       const res = await db.query(query, values);
-      console.log(
-        `[DB] Saved Profile ID: ${res.rows[0].id} (${profile?.name})`
-      );
+      console.log(`[DB] Profile saved: ${url} (Status: ${status})`);
       return res.rows[0].id;
     } catch (err) {
       console.error("[DB Error] Gagal insert profile:", err.message);

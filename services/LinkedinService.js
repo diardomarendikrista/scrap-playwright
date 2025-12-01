@@ -62,6 +62,7 @@ class LinkedInService {
     while (isRunning) {
       let currentEmail = null;
       let browser = null;
+      let taskId = null;
 
       try {
         // Ambil URL Pending dari Queue
@@ -72,6 +73,7 @@ class LinkedInService {
           await new Promise((r) => setTimeout(r, 10000));
           continue;
         }
+        taskId = task.id;
 
         // Ambil Akun yang sedang idle (Rotasi)
         const account = await getIdleAccount();
@@ -94,26 +96,41 @@ class LinkedInService {
 
         // Proses Scraping
         const composite = new CompositeScraper(browser);
-        console.log(`[Queue ID: ${task.id}] Processing...`);
-
-        // Update status antrian jadi 'processing' (opsional, sbnrnya sudah di getNextPending kalau pakai logic update)
-        // await QueueRepository.updateStatus(task.id, "processing");
+        console.log(`[Queue ID: ${taskId}] Processing...`);
 
         const data = await composite.scrapeAll(task.target_url);
+
+        // SUKSES:
         data.url = task.target_url;
-
-        // Simpan Data Profil ke DB
-        await ProfileRepository.save(data);
-
-        // Tandai Selesai di Queue
-        await QueueRepository.updateStatus(task.id, "done");
-        console.log(`[Queue ID: ${task.id}] Status -> DONE`);
+        await ProfileRepository.save(data, "success", null); // Save Success
+        await QueueRepository.updateStatus(taskId, "done");
+        console.log(`[Queue ID: ${taskId}] Status -> DONE`);
       } catch (error) {
         console.error(`[Worker Error]:`, error.message);
 
-        // Jika error terjadi saat memproses task tertentu, update status task
-        // (Variabel 'task' mungkin tidak scope di sini kalau errornya di level atas,
-        // tapi logika try-catch di dalam loop biasanya aman)
+        // HANDLING KHUSUS JIKA ERROR
+        if (taskId) {
+          // Jika errornya karena Profil Tidak Ditemukan (404)
+          if (error.message === "PROFILE_NOT_FOUND") {
+            // Update Queue jadi 'failed' (biar ga nyangkut processing)
+            await QueueRepository.updateStatus(
+              taskId,
+              "failed",
+              "Profile not found / 404"
+            );
+
+            // Masukkan ke Tabel Profiles sebagai 'not_found' (Sesuai request kamu)
+            // Kita kirim objek data kosong cuma isi URL
+            await ProfileRepository.save(
+              { url: error.url || "unknown" },
+              "not_found",
+              "Profile URL returned 404/Unavailable"
+            );
+          } else {
+            // Error lain (misal timeout, internet mati, login gagal)
+            await QueueRepository.updateStatus(taskId, "failed", error.message);
+          }
+        }
       } finally {
         // CLEANUP
         if (browser) {
