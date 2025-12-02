@@ -5,12 +5,29 @@ class ProfileScraper extends BaseScraper {
     const page = await this.initPage(url);
 
     try {
+      // --- 1. SAFETY CHECK (404 / Unavailable) ---
+      if (page.url().includes("/404") || page.url().includes("unavailable")) {
+        console.log("URL 404/Unavailable.");
+        await page.close();
+        return null;
+      }
+      const isNotFound = await page.$(
+        ".artdeco-empty-state, .not-found__header"
+      );
+      if (isNotFound) {
+        console.log("Elemen 404 terdeteksi.");
+        await page.close();
+        return null;
+      }
+      // -------------------------------------------
+
       await page.waitForSelector("h1", { timeout: 15000 });
-      // Scroll agar elemen header ter-render sempurna
-      await page.keyboard.press("PageDown");
-      await this.randomDelay(page, 1000, 2000);
+
+      // Scroll ke bawah agar section Experience/Education di bawah ter-render (Lazy Load)
+      await this.autoScroll(page);
     } catch (e) {
-      console.log("Element profil utama timeout...");
+      console.log("Element profil utama timeout...", e.message);
+      // Jika timeout tapi bukan 404, kita coba ambil data yang ada saja
     }
 
     const data = await page.evaluate(() => {
@@ -22,30 +39,17 @@ class ProfileScraper extends BaseScraper {
       // --- LOGIKA LOKASI (ANCHOR STRATEGY) ---
       const getLocation = () => {
         // CARA 1: Cari anchor "Contact info", lalu ambil sibling-nya.
-        // Ini cara paling akurat karena lokasi selalu satu grup dengan Contact Info.
         const contactLink = document.querySelector("a[href*='contact-info']");
-
         if (contactLink) {
-          // Struktur HTML:
-          // <div class="mt2 ...">  <-- Container
-          //    <span>Lokasi</span>
-          //    <span><a>Contact info</a></span>
-          // </div>
-
-          // Kita cari parent DIV terdekat yang membungkus contact info
           const container =
             contactLink.closest("div.mt2") ||
             contactLink.parentElement.parentElement;
-
           if (container) {
-            // Cari elemen text-body-small di dalam container yang SAMA
             const locSpan = container.querySelector(".text-body-small");
             if (locSpan) return locSpan.innerText.trim();
           }
         }
-
-        // CARA 2 (Fallback): Blacklist Filter
-        // Jika Cara 1 gagal, cari semua elemen yang "mirip" lokasi lalu filter kata terlarang.
+        // CARA 2: Blacklist Filter
         const potentialElements = document.querySelectorAll(
           ".text-body-small.t-black--light"
         );
@@ -58,28 +62,18 @@ class ProfileScraper extends BaseScraper {
           "connection",
           "followers",
         ];
-
         for (const el of potentialElements) {
           const text = el.innerText.trim();
           const lower = text.toLowerCase();
-          const isBanned = blackList.some((word) => lower.includes(word));
-
-          // Jika text ada isinya, dan tidak mengandung kata terlarang -> AMBIL
-          if (text && !isBanned) return text;
+          if (text && !blackList.some((word) => lower.includes(word)))
+            return text;
         }
-
         return null;
       };
 
-      return {
-        name: getText("h1"),
-
-        headline: getText(".text-body-medium.break-words"),
-
-        // Panggil fungsi lokasi yang baru
-        location: getLocation(),
-
-        about:
+      // --- LOGIKA ABOUT ---
+      const getAbout = () => {
+        return (
           getText(".inline-show-more-text span[aria-hidden='true']") ||
           getText(
             ".inline-show-more-text--is-collapsed span[aria-hidden='true']"
@@ -87,14 +81,86 @@ class ProfileScraper extends BaseScraper {
           getText(
             "#about ~ .display-flex .inline-show-more-text span[aria-hidden='true']"
           ) ||
-          null,
+          null
+        );
+      };
 
-        // PERBAIKAN FOTO:
-        // Menambahkan selector spesifik dari snippet kamu (--show)
+      // LOGIKA BARU (UNTUK MENGAMBIL LIST DARI HALAMAN DEPAN)
+      const getSectionData = (anchorId) => {
+        const anchor = document.getElementById(anchorId);
+        if (!anchor) return [];
+
+        const section = anchor.closest("section");
+        if (!section) return [];
+
+        // Selector Agresif: Mencari item list berdasarkan 'data-view-name' atau class list biasa
+        // HTML kamu menunjukkan item dibungkus div[data-view-name="profile-component-entity"]
+        const entities = section.querySelectorAll(
+          'div[data-view-name="profile-component-entity"]'
+        );
+        const items =
+          entities.length > 0
+            ? entities
+            : section.querySelectorAll(
+                "li.artdeco-list__item, li.pvs-list__paged-list-item"
+              );
+
+        return [...items]
+          .map((el) => {
+            // Cari kolom teks vertikal (Flex Column)
+            // Logic: Cari div .display-flex.flex-column terdekat di dalam elemen ini
+            const textCol = el.querySelector(".display-flex.flex-column");
+            if (!textCol) return null;
+
+            // Ambil semua span teks bersih (aria-hidden=true)
+            const spans = textCol.querySelectorAll("span[aria-hidden='true']");
+            if (spans.length < 1) return null;
+
+            // Mapping berdasarkan urutan baris di halaman depan:
+            // Baris 1 (Bold) = Title (ex: Frontend Developer)
+            // Baris 2 (Normal) = Subtitle (ex: Daya Dimensi Indonesia)
+            // Baris 3 (Gray) = Meta (ex: Jun 2021 - Present)
+
+            const title = spans[0]?.innerText.trim() || null;
+            const subtitle = spans[1]?.innerText.trim() || null;
+            const meta = spans[2]?.innerText.trim() || null;
+
+            // Ambil deskripsi jika ada (biasanya tersembunyi di tombol see more)
+            const descElem =
+              el.querySelector(
+                ".inline-show-more-text span[aria-hidden='true']"
+              ) ||
+              el.querySelector(
+                ".inline-show-more-text--is-collapsed span[aria-hidden='true']"
+              );
+            const description = descElem?.innerText.trim() || null;
+
+            return { title, subtitle, meta, description };
+          })
+          .filter((i) => i && i.title);
+      };
+
+      // RETURN DATA GABUNGAN
+      return {
+        name: getText("h1"),
+        headline: getText(".text-body-medium.break-words"),
+
+        location: getLocation(), // Pakai logic lama
+        about: getAbout(), // Pakai logic lama
+
         photo:
           getSrc("img.pv-top-card-profile-picture__image--show") ||
           getSrc("img.pv-top-card-profile-picture__image") ||
           getSrc(".profile-photo-edit__preview"),
+
+        // --- PREVIEW DATA (DATA CADANGAN) ---
+        // Ini yang akan dipakai CompositeScraper jika halaman detail kosong
+        _preview_experiences: getSectionData("experience"),
+        _preview_educations: getSectionData("education"),
+        _preview_certifications: getSectionData("licenses_and_certifications"),
+        _preview_projects: getSectionData("projects"),
+        _preview_skills: getSectionData("skills"),
+        _preview_recommendations: getSectionData("recommendations"),
       };
     });
 

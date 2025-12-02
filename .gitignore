@@ -12,3 +12,5 @@ node_modules/
 npm-debug.log
 
 data.json
+notes.txt
+accounts.json

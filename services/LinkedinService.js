@@ -102,7 +102,18 @@ class LinkedInService {
 
         // SUKSES:
         data.url = task.target_url;
-        await ProfileRepository.save(data, "success", null); // Save Success
+
+        // --- LOGIC PEMBUATAN NOTE ---
+        let status = "success";
+        let note = "Full Detail Scraped";
+
+        // Cek apakah ada log fallback?
+        if (data._fallback_logs && data._fallback_logs.length > 0) {
+          // Contoh Note: "Used Preview for: experience, education"
+          note = `Used Preview (Summary) for: ${data._fallback_logs.join(", ")}`;
+        }
+
+        await ProfileRepository.save(data, status, note); // Save Success
         await QueueRepository.updateStatus(taskId, "done");
         console.log(`[Queue ID: ${taskId}] Status -> DONE`);
       } catch (error) {
