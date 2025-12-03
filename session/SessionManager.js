@@ -116,14 +116,35 @@ class SessionManager {
       console.log("Navigasi feed timeout, cek login...");
     }
 
-    // Cek indikator logout
+    // DETEKSI: Apakah masuk ke halaman Login?
     const isLoginPage =
       page.url().includes("login") ||
+      page.url().includes("uas/login") ||
       (await page.$("#username")) ||
       (await page.$(".login__form_action_container"));
 
     if (isLoginPage) {
-      console.log(`[Auth] Sesi mati. Mengambil password dari DB...`);
+      console.log(`[Auth] Sesi mati / Halaman Login terdeteksi.`);
+
+      // --- HANDLING KHUSUS: "Welcome Back" Screen ---
+      // Cek apakah ada tombol "Sign in using another account" sesuai HTML kamu
+      const signInAnotherBtn = await page.$("button.signin-other-account");
+
+      if (signInAnotherBtn) {
+        console.log(
+          "[Auth] Terdeteksi layar 'Welcome Back'. Klik 'Sign in using another account'..."
+        );
+        await signInAnotherBtn.click();
+
+        // Tunggu sampai form username muncul
+        try {
+          await page.waitForSelector("#username", { timeout: 5000 });
+        } catch (e) {
+          console.log("Form username belum muncul, mencoba lanjut...");
+        }
+      }
+
+      console.log(`[Auth] Mengambil password dari DB...`);
 
       // Ambil Password dari DB
       const res = await db.query(

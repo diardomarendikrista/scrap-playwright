@@ -21,13 +21,13 @@ class ProfileScraper extends BaseScraper {
       }
       // -------------------------------------------
 
-      await page.waitForSelector("h1", { timeout: 15000 });
+      await page.waitForSelector("h1", { timeout: 30000 });
 
       // Scroll ke bawah agar section Experience/Education di bawah ter-render (Lazy Load)
       await this.autoScroll(page);
     } catch (e) {
       console.log("Element profil utama timeout...", e.message);
-      // Jika timeout tapi bukan 404, kita coba ambil data yang ada saja
+      // Jika timeout tapi bukan 404, kita coba ambil data yang ada aja
     }
 
     const data = await page.evaluate(() => {

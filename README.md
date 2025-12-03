@@ -52,33 +52,38 @@ npm install
 Buat database baru di PostgreSQL bernama scrap_playwright. Lalu jalankan query SQL berikut di query tool (pgAdmin/DBeaver) untuk membuat tabel:
 
 ```SQL
--- Tabel Akun (Multi-Tenant & Rotation)
+-- Tabel Akun (Multi-Tenant, Rotation & Rate Limiter)
 CREATE TABLE accounts (
-id SERIAL PRIMARY KEY,
-email VARCHAR(255) UNIQUE NOT NULL,
-password VARCHAR(255) NOT NULL,
-cookies JSONB,
-is_active BOOLEAN DEFAULT TRUE,
-is_busy BOOLEAN DEFAULT FALSE, -- Penanda sedang dipakai worker
-last_used TIMESTAMP,
-created_at TIMESTAMP DEFAULT NOW()
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    cookies JSONB,
+    is_active BOOLEAN DEFAULT TRUE,
+    is_busy BOOLEAN DEFAULT FALSE, -- Penanda sedang dipakai worker
+
+    -- Rate Limiting Logic
+    hourly_count INT DEFAULT 0,    -- Hitungan pemakaian per jam
+    last_used TIMESTAMP,           -- Waktu terakhir dipakai
+
+    note TEXT,                     -- Catatan tambahan (misal: Akun Utama/Cadangan)
+    created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Tabel Antrian (Queue System)
+-- 2. Tabel Antrian (Queue System)
 CREATE TABLE scrape_queue (
-id SERIAL PRIMARY KEY,
-target_url TEXT UNIQUE NOT NULL,
-status VARCHAR(20) DEFAULT 'pending', -- pending, processing, done, failed
-attempts INT DEFAULT 0,
-error_log TEXT,
-created_at TIMESTAMP DEFAULT NOW(),
-updated_at TIMESTAMP DEFAULT NOW()
+    id SERIAL PRIMARY KEY,
+    target_url TEXT UNIQUE NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending', -- pending, processing, done, failed
+    attempts INT DEFAULT 0,
+    error_log TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
 );
 
--- Tabel Data Profil (Hybrid Relational + JSONB)
+-- 3. Tabel Data Profil (Hybrid Relational + JSONB)
 CREATE TABLE profiles (
-id SERIAL PRIMARY KEY,
-url TEXT UNIQUE NOT NULL,
+    id SERIAL PRIMARY KEY,
+    url TEXT UNIQUE NOT NULL,
 
     -- Kolom Utama (Mudah di-search/filter)
     name VARCHAR(255),
@@ -95,13 +100,12 @@ url TEXT UNIQUE NOT NULL,
     skills JSONB DEFAULT '[]',
     recommendations JSONB DEFAULT '[]',
 
-    -- kolom status dan catatan
+    -- Status & Catatan (Untuk Fallback/Error handling)
     status VARCHAR(20) DEFAULT 'success',
     note TEXT,
 
     -- Metadata
     scraped_at TIMESTAMP DEFAULT NOW()
-
 );
 
 -- Indexing untuk performa query JSON
@@ -114,10 +118,6 @@ CREATE INDEX idx_profiles_skills ON profiles USING GIN (skills);
 Buat file .env di root folder dan isi kredensial Database serta akun LinkedIn (untuk seeding awal).
 
 ```
-# Akun LinkedIn (Hanya untuk seeding awal via script)
-LINKEDIN_EMAIL=email_dummy@gmail.com
-LINKEDIN_PASSWORD=password_rahasia
-
 # Database Config
 DB_USER=postgres
 DB_PASS=password_postgres_kamu
@@ -128,13 +128,30 @@ DB_NAME=scrap_playwright
 
 ### 4. Seed Akun ke Database
 
-Masukkan akun LinkedIn dari .env ke dalam tabel database agar bisa dipakai oleh worker.
+Buat file accounts.json di root folder (sejajar dengan app.js) dan isi dengan daftar akun yang ingin digunakan:
+
+```json
+[
+  {
+    "email": "akun1@gmail.com",
+    "password": "password123",
+    "note": ""
+  },
+  {
+    "email": "akun2@yahoo.com",
+    "password": "rahasia456",
+    "note": ""
+  }
+]
+```
+
+Pastikan accounts.json sudah masuk ke .gitignore agar kredensial aman.
 
 ```
 node seed-account.js
 ```
 
-(Ulangi langkah ini dengan mengubah .env jika ingin mendaftarkan banyak akun sekaligus).
+(Ulangi langkah ini jika ingin menambah akun baru atau mereset limit/status akun).
 
 ## # Cara Menjalankan
 
@@ -146,12 +163,6 @@ npm run start
 ```
 
 ## # API Documentation
-
-Ada dua metode penggunaan: **Mode Queue (Disarankan)** untuk scraping massal, dan **Mode Manual** untuk testing cepat.
-
-### A. Mode Queue (Best Practice untuk Bulk Data)
-
-Gunakan mode ini jika ingin scrape ratusan/ribuan data. Worker akan berjalan di background, mengambil antrian dari DB, dan otomatis berganti akun jika akun saat ini sibuk/limit.
 
 #### 1. Masukkan URL ke Antrian (Input Batch)
 
@@ -186,40 +197,19 @@ Gunakan mode ini jika ingin scrape ratusan/ribuan data. Worker akan berjalan di 
 
 #### 2. Nyalakan Worker (Mesin Scraping)
 
+Endpoint ini memerintahkan server untuk mulai memproses antrian yang menumpuk.
+
 **Endpoint:** `GET /worker/start`
 
-- Script worker akan mulai berjalan di _background_ server.
-- **Alur Kerja Worker:**
-  1.  Cek tabel `scrape_queue` untuk status `pending`.
-  2.  Cek tabel `accounts` untuk mencari akun yang `idle` (tidak sibuk & paling lama istirahat).
-  3.  Login / Sync Session cookies dari DB ke Local.
-  4.  Scrape data target -> Simpan hasil ke tabel `profiles`.
-  5.  Update status URL menjadi `done`.
-  6.  Lepaskan akun (set `is_busy = false`) agar bisa dipakai lagi.
-- **Monitoring:** Pantau progress log secara realtime di terminal VS Code / Server log.
-
----
-
-### B. Mode Manual (Direct Scrape)
-
-Gunakan mode ini hanya untuk testing cepat satu profil secara langsung (synchronous). Hasil scrape akan langsung dikembalikan sebagai JSON response (dan juga disimpan ke DB).
-
-**Endpoint:** `POST /scrape`
-
-**Body (JSON):**
-
-```json
-{
-  "email": "email_akun_bot_di_db@gmail.com",
-  "urls": [
-    {
-      "url": "[https://www.linkedin.com/in/target-user/](https://www.linkedin.com/in/target-user/)"
-    }
-  ]
-}
-```
-
-- **Catatan:** Field `email` **wajib diisi** agar script tahu akun mana yang harus dipakai dari database. Tidak perlu mengirim password.
+* Script worker akan berjalan di *background*.
+* **Alur Kerja Cerdas:**
+    1.  **Cek Antrian:** Mengambil 1 URL `pending` dari Queue.
+    2.  **Cek Akun Aman:** Mencari akun yang `idle` (tidak sibuk) **DAN** kuota pemakaiannya belum mencapai limit (10 view/jam). Jika semua akun limit habis, worker akan istirahat otomatis.
+    3.  **Sync Session:** Login otomatis menggunakan cookies terbaru dari database (support multi-device).
+    4.  **Scraping & Fallback:** Mencoba mengambil data detail. Jika gagal/kosong, otomatis mengambil data *summary* dari halaman depan sebagai cadangan.
+    5.  **Simpan Hasil:** Data disimpan ke tabel `profiles` lengkap dengan catatan (Note) jika menggunakan data fallback.
+    6.  **Cleanup:** Status URL diubah jadi `done`, browser ditutup, dan akun dilepas agar bisa dipakai worker lain.
+* **Monitoring:** Pantau progress log secara realtime di terminal VS Code.
 
 ---
 

@@ -4,6 +4,7 @@ const HOURLY_LIMIT = 8;
 async function getIdleAccount() {
   // cek kondisi akun bisa dipakai ketika apa
   // skrg sejam maksimal adalah {HOURLY_LIMIT} kali scrape
+
   const query = `
     UPDATE accounts
     SET 
@@ -17,21 +18,23 @@ async function getIdleAccount() {
         ELSE hourly_count + 1 
       END,
       
-      last_used = NOW()
+      last_used = NOW() -- Update waktu pemakaian sekarang
       
     WHERE id = (
       SELECT id FROM accounts
       WHERE is_active = TRUE 
         AND is_busy = FALSE
         AND (
-          -- Syarat: Akun baru ATAU sudah istirahat sejam ATAU masih punya sisa kuota
+          -- Syarat 1: Akun baru (belum pernah dipakai)
           last_used IS NULL
-          OR EXTRACT(EPOCH FROM (NOW() - last_used)) > 3600
-          OR hourly_count < ${HOURLY_LIMIT}
+          OR
+          -- Syarat 2: Sudah istirahat lebih dari 1 jam (Reset Kuota)
+          EXTRACT(EPOCH FROM (NOW() - last_used)) > 3600
+          OR 
+          -- Syarat 3: Masih dalam periode 1 jam yg sama, TAPI kuota belum habis
+          hourly_count < ${HOURLY_LIMIT}
         )
-      -- Kita urutkan berdasarkan last_used DESC (Paling baru dipakai)
-      -- Tujuannya: "Lanjutkan akun yang tadi baru saja kerja, selesaikan jatahnya"
-      ORDER BY last_used DESC NULLS LAST 
+      ORDER BY last_used ASC NULLS FIRST -- Prioritaskan yang paling lama nganggur
       LIMIT 1
       FOR UPDATE SKIP LOCKED
     )

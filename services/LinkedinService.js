@@ -1,162 +1,153 @@
-// src/services/LinkedInService.js
 const SessionManager = require("../session/SessionManager");
 const CompositeScraper = require("../scrapers/CompositeScraper");
 const ProfileRepository = require("../database/ProfileRepository");
 const QueueRepository = require("../database/QueueRepository");
-const { getIdleAccount, releaseAccount } = require("../helpers/getIdleAccount");
+const {
+  getIdleAccount,
+  releaseAccount,
+  HOURLY_LIMIT,
+} = require("../helpers/getIdleAccount");
+const db = require("../config/db");
 
 class LinkedInService {
-  /**
-   * MODE MANUAL: Scrape langsung dari array URL yang dikirim via API
-   * Berguna untuk testing cepat.
-   */
-  async scrapeProfiles(urlList, email) {
-    // Load Browser sesuai email yang dipilih
-    const browser = await SessionManager.loadBrowser(email);
-
-    try {
-      // Validasi Login
-      await SessionManager.validateOrLogin(browser, email);
-
-      const results = [];
-      const composite = new CompositeScraper(browser);
-
-      for (const item of urlList) {
-        const url = item.url;
-        console.log(`\n=== [Manual] Mulai Scraping: ${url} ===`);
-
-        try {
-          const data = await composite.scrapeAll(url);
-
-          // Inject URL & Simpan ke DB
-          data.url = url;
-          await ProfileRepository.save(data);
-
-          results.push({ url, status: "success", saved_db: true, data });
-        } catch (e) {
-          console.error(`[Manual] Gagal scrape ${url}:`, e.message);
-          results.push({ url, status: "failed", error: e.message });
-        }
-
-        // Delay agar tidak terdeteksi bot
-        await new Promise((r) => setTimeout(r, Math.random() * 3000 + 2000));
-      }
-
-      return results;
-    } catch (error) {
-      throw error;
-    } finally {
-      await browser.close();
-    }
-  }
-
-  /**
-   * MODE WORKER: Otomatis mengambil antrian dari Database
-   * Mendukung rotasi akun dan update status antrian.
-   */
   async startQueueWorker() {
-    console.log("=== WORKER STARTED: Menunggu antrian... ===");
+    console.log("=== WORKER STARTED: Mode Persistent Session ===");
 
-    let isRunning = true;
+    let isWorkerRunning = true;
 
-    while (isRunning) {
+    while (isWorkerRunning) {
       let currentEmail = null;
       let browser = null;
-      let taskId = null;
 
       try {
-        // Ambil URL Pending dari Queue
-        const task = await QueueRepository.getNextPending();
-
-        if (!task) {
-          console.log("Antrian kosong. Istirahat 10 detik...");
-          await new Promise((r) => setTimeout(r, 10000));
-          continue;
-        }
-        taskId = task.id;
-
-        // Ambil Akun yang sedang idle (Rotasi)
+        // 1. CARI AKUN (SQL sudah filter yang limit habis)
         const account = await getIdleAccount();
+
         if (!account) {
-          console.log("Tidak ada akun tersedia/aktif! Menunggu 10 detik...");
-          // Kembalikan status task jadi pending lagi karena belum dikerjakan
-          await QueueRepository.updateStatus(task.id, "pending");
-          await new Promise((r) => setTimeout(r, 10000));
+          console.log("⚠️ Semua akun sibuk/limit habis. Menunggu 1 menit...");
+          await new Promise((r) => setTimeout(r, 60000));
           continue;
         }
 
         currentEmail = account.email;
+
+        // Hitung sisa kuota yang boleh diambil sesi ini
+        let usage = parseInt(account.hourly_count);
+
+        // GUNAKAN VARIABEL HOURLY_LIMIT (Jangan hardcode 10)
+        let sessionQuota = HOURLY_LIMIT - usage + 1;
+
+        // Safety cap: Maksimal scrape dalam 1 sesi browser tidak boleh melebihi sisa limit
+        // (Dan mungkin kamu mau batasi max batch browser juga, misal max 10 tab biar gak berat memori)
+        const BROWSER_BATCH_LIMIT = 10;
+        sessionQuota = Math.min(sessionQuota, BROWSER_BATCH_LIMIT);
+
         console.log(
-          `Worker pakai akun: ${currentEmail} untuk URL: ${task.target_url}`
+          `\n>>> Sesi ${currentEmail} | Limit: ${HOURLY_LIMIT} | Usage DB: ${usage} | Target Sesi: ${sessionQuota} URL`
         );
 
-        // Load Browser & Login
+        // 2. BUKA BROWSER
         browser = await SessionManager.loadBrowser(currentEmail);
         await SessionManager.validateOrLogin(browser, currentEmail);
 
-        // Proses Scraping
         const composite = new CompositeScraper(browser);
-        console.log(`[Queue ID: ${taskId}] Processing...`);
 
-        const data = await composite.scrapeAll(task.target_url);
+        // 3. PROSES BATCH
+        let processedInSession = 0;
 
-        // SUKSES:
-        data.url = task.target_url;
+        while (processedInSession < sessionQuota) {
+          // Ambil Task
+          const task = await QueueRepository.getNextPending();
 
-        // --- LOGIC PEMBUATAN NOTE ---
-        let status = "success";
-        let note = "Full Detail Scraped";
-
-        // Cek apakah ada log fallback?
-        if (data._fallback_logs && data._fallback_logs.length > 0) {
-          // Contoh Note: "Used Preview for: experience, education"
-          note = `Used Preview (Summary) for: ${data._fallback_logs.join(", ")}`;
-        }
-
-        await ProfileRepository.save(data, status, note); // Save Success
-        await QueueRepository.updateStatus(taskId, "done");
-        console.log(`[Queue ID: ${taskId}] Status -> DONE`);
-      } catch (error) {
-        console.error(`[Worker Error]:`, error.message);
-
-        // HANDLING KHUSUS JIKA ERROR
-        if (taskId) {
-          // Jika errornya karena Profil Tidak Ditemukan (404)
-          if (error.message === "PROFILE_NOT_FOUND") {
-            // Update Queue jadi 'failed' (biar ga nyangkut processing)
-            await QueueRepository.updateStatus(
-              taskId,
-              "failed",
-              "Profile not found / 404"
-            );
-
-            // Masukkan ke Tabel Profiles sebagai 'not_found' (Sesuai request kamu)
-            // Kita kirim objek data kosong cuma isi URL
-            await ProfileRepository.save(
-              { url: error.url || "unknown" },
-              "not_found",
-              "Profile URL returned 404/Unavailable"
-            );
-          } else {
-            // Error lain (misal timeout, internet mati, login gagal)
-            await QueueRepository.updateStatus(taskId, "failed", error.message);
+          if (!task) {
+            console.log("Antrian habis! Tutup sesi.");
+            break;
           }
+
+          // Jika ini bukan URL pertama di sesi ini, kita wajib lapor increment ke DB
+          if (processedInSession > 0) {
+            await this.incrementHourlyCount(currentEmail);
+          }
+
+          console.log(
+            `   [${processedInSession + 1}/${sessionQuota}] ${task.target_url}`
+          );
+          let taskId = task.id;
+
+          try {
+            const data = await composite.scrapeAll(task.target_url);
+            data.url = task.target_url;
+
+            let note = "Full Detail Scraped";
+            if (data._fallback_logs && data._fallback_logs.length > 0) {
+              note = `Summary (Fallback: ${data._fallback_logs.join(", ")})`;
+            }
+
+            await ProfileRepository.save(data, "success", note);
+            await QueueRepository.updateStatus(taskId, "done");
+            console.log(`   -> Done.`);
+          } catch (error) {
+            console.error(`   -> Error:`, error.message);
+
+            if (error.message === "PROFILE_NOT_FOUND") {
+              await QueueRepository.updateStatus(
+                taskId,
+                "failed",
+                "404 / Profile Unavailable"
+              );
+              await ProfileRepository.save(
+                { url: task.target_url },
+                "not_found",
+                "404 / Unavailable"
+              );
+            } else {
+              await QueueRepository.updateStatus(
+                taskId,
+                "failed",
+                error.message
+              );
+
+              if (
+                error.message.includes("Target closed") ||
+                error.message.includes("Session")
+              ) {
+                console.log("Browser crash. Restarting session...");
+                break;
+              }
+            }
+          }
+
+          processedInSession++;
+          // Delay antar profil dalam satu sesi
+          await new Promise((r) => setTimeout(r, Math.random() * 3000 + 3000));
         }
+      } catch (error) {
+        console.error(`[Session Error]:`, error.message);
       } finally {
-        // CLEANUP
+        // 4. CLEANUP
         if (browser) {
+          console.log("Menutup browser...");
           await browser.close();
         }
-
-        // Lepaskan akun agar bisa dipakai worker lain/batch selanjutnya
         if (currentEmail) {
           await releaseAccount(currentEmail);
           console.log(`Akun ${currentEmail} dilepas.`);
         }
 
-        // Delay antar antrian agar seperti manusia
-        await new Promise((r) => setTimeout(r, Math.random() * 5000 + 3000));
+        await new Promise((r) => setTimeout(r, 5000));
       }
+    }
+  }
+
+  // Helper untuk update counter manual di tengah sesi
+  async incrementHourlyCount(email) {
+    try {
+      await db.query(
+        `UPDATE accounts SET hourly_count = hourly_count + 1 WHERE email = $1`,
+        [email]
+      );
+    } catch (e) {
+      console.error("Gagal update hourly count:", e.message);
     }
   }
 }
